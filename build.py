@@ -71,7 +71,7 @@ PIF_CLASSES_DEX_DEFAULT = REPO_ROOT / "build" / "pif" / "classes.dex"
 # name under /data/adb/modules and therefore part of the payload's file paths.
 MODULE_NAME = "OhMyKeymint-R1"
 MODULE_ID = "oh_my_keymint"
-MODULE_VERSION_CODE = "100"
+MODULE_VERSION_CODE = "102"
 
 REQUIRED_TEMPLATE_FILES = (
     "customize.sh",
