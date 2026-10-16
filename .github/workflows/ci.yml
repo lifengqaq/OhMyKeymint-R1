@@ -156,8 +156,9 @@ jobs:
         BUILD_TOOLS=35.0.0
         PLATFORM=android-35
         echo "y" | sdkmanager --install "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
-        curl -fsSL -o /tmp/hiddenapibypass.jar \
-          "https://repo1.maven.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.2/hiddenapibypass-6.2.jar"
+        curl -fsSL -o /tmp/hiddenapibypass.aar \
+          "https://repo1.maven.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.2/hiddenapibypass-6.2.aar"
+        unzip -p /tmp/hiddenapibypass.aar classes.jar > /tmp/hiddenapibypass.jar
         android_jar="${ANDROID_SDK_ROOT}/platforms/$PLATFORM/android.jar"
         src="third_party/PlayIntegrityFix/zygisk/src/main/java"
         rm -rf /tmp/pif-classes && mkdir -p /tmp/pif-classes build/pif
