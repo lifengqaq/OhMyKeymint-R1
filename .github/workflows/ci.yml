@@ -1,0 +1,275 @@
+name: Build OhMyKeymint
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches: [ "master" ]
+    paths-ignore:
+      - '**.md'
+      - '**.txt'
+      - '.github/**'
+      - '!.github/workflows/**'
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-boringssl:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Clone BoringSSL
+      run: |
+        git clone https://boringssl.googlesource.com/boringssl
+
+    - name: Cache BoringSSL build
+      uses: actions/cache@v6
+      id: boringssl-cache
+      with:
+        path: boringssl/build
+        key: boringssl-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
+
+    - name: Install Rust toolchain
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        target: aarch64-linux-android
+
+    - name: Install Android SDK
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      uses: android-actions/setup-android@v4
+    - name: Install Android NDK and bindgen
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      run: |
+        cargo install bindgen-cli
+        echo "y" | sdkmanager --install "ndk;29.0.14206865" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "cmake;4.1.2" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+
+    - name: Install build dependencies
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build gcc-multilib
+
+    - name: Build BoringSSL
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      run: |
+        cd boringssl
+        export PATH="~/.cargo/bin:$PATH"
+        $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B build \
+          -DRUST_BINDINGS=aarch64-linux-android \
+          -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/29.0.14206865/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-21 \
+          -DANDROID_STL=c++_shared
+        ninja -j$(nproc) -C build
+    - name: Tar BoringSSL
+      run: |
+        tar czf boringssl.tar.gz boringssl/build boringssl/rust
+    
+    - name: Output BoringSSL
+      uses: actions/upload-artifact@v7
+      with:
+        name: boringssl.tar.gz
+        path: boringssl.tar.gz
+        retention-days: 3
+
+  setup-and-build:
+    runs-on: ubuntu-latest
+    needs:
+      - build-boringssl
+    permissions:
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        build-type: [debug, release]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Install pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 10.15.1
+        run_install: false
+
+    - name: Install Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+        cache: pnpm
+        cache-dependency-path: webui/pnpm-lock.yaml
+
+    - name: Build WebUI
+      run: |
+        pnpm --dir webui install --frozen-lockfile
+        pnpm --dir webui build
+
+    - name: Verify committed WebUI build
+      run: |
+        webroot_status="$(git status --porcelain=v1 --untracked-files=all -- template/webroot)"
+        if ! git diff --exit-code -- template/webroot || [ -n "$webroot_status" ]; then
+          git status --short --untracked-files=all -- template/webroot
+          git diff -- template/webroot
+          echo "template/webroot does not match the reproducible WebUI build" >&2
+          exit 1
+        fi
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        target: aarch64-linux-android
+
+    - name: Cache Cargo registry and build artifacts
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Install Android SDK
+      uses: android-actions/setup-android@v4
+    - name: Install Android NDK
+      run: |
+        echo "y" | sdkmanager --install "ndk;29.0.14206865" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+    - name: Install protoc
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
+
+    - name: Build PIF Java payload (classes.dex)
+      run: |
+        BUILD_TOOLS=35.0.0
+        PLATFORM=android-35
+        echo "y" | sdkmanager --install "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        curl -fsSL -o /tmp/hiddenapibypass.jar \
+          "https://repo1.maven.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.2/hiddenapibypass-6.2.jar"
+        android_jar="${ANDROID_SDK_ROOT}/platforms/$PLATFORM/android.jar"
+        src="third_party/PlayIntegrityFix/zygisk/src/main/java"
+        rm -rf /tmp/pif-classes && mkdir -p /tmp/pif-classes build/pif
+        javac -encoding UTF-8 -source 17 -target 17 \
+          -classpath "$android_jar:/tmp/hiddenapibypass.jar" \
+          -d /tmp/pif-classes $(find "$src" -name '*.java')
+        "${ANDROID_SDK_ROOT}/build-tools/$BUILD_TOOLS/d8" \
+          --lib "$android_jar" --min-api 26 \
+          --output build/pif \
+          $(find /tmp/pif-classes -name '*.class')
+        test -f build/pif/classes.dex
+
+    - name: Download BoringSSL
+      uses: actions/download-artifact@v8
+      with:
+        name: boringssl.tar.gz
+        path: .
+
+    - name: Configure Cargo for Android target
+      run: |
+        tar xf boringssl.tar.gz
+        python scripts/setup_cargo_config.py \
+          --force \
+          --ndk-root "$ANDROID_SDK_ROOT/ndk/29.0.14206865" \
+          --host-tag linux-x86_64
+        cat >> .cargo/config.toml <<EOF
+
+        [patch.crates-io]
+        bssl-sys = { path = "$GITHUB_WORKSPACE/boringssl/rust/bssl-sys" }
+        EOF
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install toml
+
+    - name: Build OhMyKeymint
+      id: prepareArtifact
+      env:
+        BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
+      run: |
+        unset RUSTFLAGS
+        python build.py --${{ matrix.build-type }}
+        name=`ls target/OhMyKeymint* | awk -F '(/|.zip)' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
+        unzip target/OhMyKeymint*.zip -d module-${{ matrix.build-type }}
+
+    - name: Upload module package
+      uses: actions/upload-artifact@v7
+      with:
+        name: package-${{ matrix.build-type }}
+        path: target/OhMyKeymint*.zip
+        retention-days: 90
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v7
+      id: upload
+      with:
+        name: ${{ steps.prepareArtifact.outputs.releaseName }}
+        path: "./module-${{ matrix.build-type }}/*"
+        retention-days: 90
+
+    - name: Attest release build provenance
+      if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.build-type == 'release' }}
+      uses: actions/attest-build-provenance@v4
+      with:
+        subject-name: ${{ steps.prepareArtifact.outputs.releaseName }}
+        subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-and-build
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    permissions:
+      contents: write
+    steps:
+    - name: Download module packages
+      uses: actions/download-artifact@v8
+      with:
+        pattern: package-*
+        path: dist
+        merge-multiple: true
+
+    - name: Publish GitHub release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        REPO: ${{ github.repository }}
+        TAG_NAME: ${{ github.ref_name }}
+      run: |
+        shopt -s nullglob
+        packages=(dist/*.zip)
+        if [ "${#packages[@]}" -eq 0 ]; then
+          echo "::error::No release package was produced."
+          exit 1
+        fi
+        release_package=""
+        for package in "${packages[@]}"; do
+          case "$package" in
+            *-debug.zip) ;;
+            *) release_package="$package" ;;
+          esac
+        done
+        if [ -n "$release_package" ]; then
+          title="$(basename "$release_package" .zip)"
+        else
+          title="$(basename "${packages[0]}" .zip)"
+        fi
+        if ! gh release view "$TAG_NAME" --repo "$REPO" >/dev/null 2>&1; then
+          gh release create "$TAG_NAME" --repo "$REPO" --title "$title" --generate-notes
+        else
+          gh release edit "$TAG_NAME" --repo "$REPO" --title "$title"
+        fi
+        for package in "${packages[@]}"; do
+          gh release upload "$TAG_NAME" "$package" --repo "$REPO" --clobber
+        done

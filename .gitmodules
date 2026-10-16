@@ -1,0 +1,4 @@
+[submodule "third_party/PlayIntegrityFix"]
+	path = third_party/PlayIntegrityFix
+	url = https://github.com/KOWX712/PlayIntegrityFix.git
+	branch = inject_s

@@ -1,0 +1,7 @@
+id=oh_my_keymint
+name=OhMyKeymint-R1
+version=${versionName}
+versionCode=${versionCode}
+author=James Clef,ITxiao6666,浅笑呐
+description=❌ OMK-R1 运行失败请把/data/misc/keystore/omk/logs/目录下日志给开发者。
+updateJson=https://raw.githubusercontent.com/qianxiaoaa/OhMyKeymint-R1/changelog/update.json
